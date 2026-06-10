@@ -1,0 +1,38 @@
+# ============================================================
+# drum-copy セットアップ手順
+# Python 3.11 の仮想環境で実行すること
+# ============================================================
+
+# 1. 仮想環境を作成・有効化
+#    py -3.11 -m venv .venv
+#    .venv\Scripts\Activate.ps1   (PowerShell)
+#    .venv\Scripts\activate.bat   (CMD)
+
+# 2. ビルドツールをインストール
+#    pip install wheel "Cython>=0.29.32" "setuptools<82"
+
+# 3. PyTorch (CPU 版)
+#    pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+#
+#    GPU (CUDA 12.1) を使う場合:
+#    pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# 4. Demucs
+#    pip install demucs
+
+# 5. madmom (omnizart の依存。ビルド隔離を無効にして先にインストール)
+#    pip install madmom --no-build-isolation
+
+# 6. omnizart (vamp 依存を除いたパッチ版をソースからインストール)
+#    git clone https://github.com/Music-and-Culture-Technology-Lab/omnizart.git .omnizart_src
+#    --- .omnizart_src/setup.py を編集: vamp の pre-install ブロックを削除し install_requires から 'vamp>=1.1.0' を除く ---
+#    pip install .\.omnizart_src --no-build-isolation
+
+# ============================================================
+# 実際の依存パッケージ (参考)
+# ============================================================
+torch
+torchaudio
+demucs
+madmom
+omnizart

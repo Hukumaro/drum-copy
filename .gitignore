@@ -1,0 +1,36 @@
+# データディレクトリ（Google Drive で管理）
+input/
+output/
+tmp/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# 仮想環境
+.venv/
+venv/
+env/
+
+# Jupyter チェックポイント
+.ipynb_checkpoints/
+
+# エディタ
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# omnizart local build (Colab インストール用の一時クローン)
+.omnizart_src/
+.tmp_pkg/
+
+# omnizart / PyTorch モデルキャッシュ
+~/.omnizart/
+*.pt
+*.th
