@@ -35,8 +35,8 @@ def git_clone(url, dest):
 print("1/6  numpy をピン留め（2.x 非互換回避）...")
 pip_run("numpy<2.0", flags=["-q"])
 
-print("2/6  demucs / soundfile...")
-pip_run("demucs", "soundfile", flags=["-q"])
+print("2/6  demucs...")
+pip_run("demucs", flags=["-q"])
 
 print("3/6  setuptools / wheel（Python 3.12 の distutils 削除対策）...")
 pip_run("setuptools<70", "wheel", flags=["-q"])

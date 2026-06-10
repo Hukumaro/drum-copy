@@ -1,11 +1,10 @@
 import logging
 from pathlib import Path
 
-import soundfile as sf
 import torch
+import torchaudio
 
 from demucs.apply import apply_model
-from demucs.audio import AudioFile
 from demucs.pretrained import get_model
 
 logger = logging.getLogger(__name__)
@@ -43,11 +42,15 @@ def separate(input_path: Path, tmp_dir: Path, model: str = "htdemucs") -> Path:
     demucs_model.eval()
 
     logger.info("Loading audio: %s", input_path)
-    wav = AudioFile(input_path).read(
-        streams=0,
-        samplerate=demucs_model.samplerate,
-        channels=demucs_model.audio_channels,
-    )
+    # torchaudio avoids soundfile entirely (uses sox_io backend on Linux/Colab),
+    # sidestepping the numpy.dtypes.Float64DType incompatibility in soundfile.
+    wav, sr = torchaudio.load(str(input_path))
+    if sr != demucs_model.samplerate:
+        wav = torchaudio.functional.resample(wav, sr, demucs_model.samplerate)
+    if wav.shape[0] == 1 and demucs_model.audio_channels == 2:
+        wav = wav.repeat(2, 1)
+    elif wav.shape[0] > 1 and demucs_model.audio_channels == 1:
+        wav = wav.mean(0, keepdim=True)
 
     ref = wav.mean(0)
     wav -= ref.mean()
@@ -80,9 +83,7 @@ def separate(input_path: Path, tmp_dir: Path, model: str = "htdemucs") -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     drums_path = out_dir / "drums.wav"
 
-    # soundfile expects (samples, channels); drums_tensor is (channels, samples)
-    drums_np = drums_tensor.cpu().numpy().T
-    sf.write(str(drums_path), drums_np, samplerate=demucs_model.samplerate)
+    torchaudio.save(str(drums_path), drums_tensor.cpu(), demucs_model.samplerate)
 
     logger.info("Drum stem saved: %s", drums_path)
     return drums_path
