@@ -1,6 +1,11 @@
 import logging
+import pkgutil
 import shutil
 from pathlib import Path
+
+# Python 3.12 removed pkgutil.ImpImporter, but older deps (pkg_resources, music21) still reference it.
+if not hasattr(pkgutil, "ImpImporter"):
+    pkgutil.ImpImporter = type(None)  # type: ignore[attr-defined]
 
 logger = logging.getLogger(__name__)
 
