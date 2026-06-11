@@ -10,7 +10,7 @@
 pipeline/
 ├── __init__.py             # パッケージ初期化（空ファイルで可）
 ├── stem_separation/        # Step 1: Demucs によるドラム stem 分離
-└── transcription/          # Step 2: omnizart によるドラム自動採譜
+└── transcription/          # Step 2: MT3 によるドラム自動採譜
 ```
 
 ## 設計原則

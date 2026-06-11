@@ -53,7 +53,6 @@ def process_file(
     logger.info("=== Step 2: Drum transcription — %s ===", drums_wav.name)
     midi_path = transcribe(drums_wav, output_dir)
 
-    # Rename to match the original audio file stem if omnizart used a different name.
     if midi_path.stem != input_path.stem:
         renamed = midi_path.parent / (input_path.stem + ".mid")
         midi_path.rename(renamed)

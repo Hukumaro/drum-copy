@@ -37,19 +37,19 @@ drum-copy/
 │   └── colab.py            #   Google Colab + Google Drive 実行
 └── pipeline/
     ├── stem_separation/    # Step 1: Demucs によるドラム stem 分離モジュール
-    └── transcription/      # Step 2: omnizart によるドラム自動採譜モジュール
+    └── transcription/      # Step 2: MT3 によるドラム自動採譜モジュール
 ```
 
 ## 処理フロー
 
 1. `input/` に配置した楽曲ファイルを受け取る
 2. **Step 1 – Stem 分離**: `pipeline/stem_separation/` の処理で Demucs を呼び出し、ドラムトラックを `tmp/` に一時保存
-3. **Step 2 – 自動採譜**: `pipeline/transcription/` の処理で omnizart drum モジュールを呼び出し、`output/` に MIDI を保存
+3. **Step 2 – 自動採譜**: `pipeline/transcription/` の処理で MT3 を使ってドラムを採譜し、`output/` に MIDI を保存
 4. `tmp/` の中間ファイルは任意でクリーンアップ
 
 ## 設計方針
 
-- omnizart の出力結果は加工せず、生データをそのまま MIDI として保存する
+- MT3 の出力結果は加工せず、生データをそのまま MIDI として保存する
 - 各ステップは独立したモジュールとして実装し、単体でも呼び出し可能にする
 - パスはすべてエントリーポイントから引数として渡し、各モジュール内にハードコードしない
 - **`backends/` レイヤー**で実行環境の差異（ローカル / Colab / 将来のサーバーレスGPU）を吸収する
@@ -67,15 +67,17 @@ drum-copy/
 | ライブラリ | 用途 |
 |-----------|------|
 | `demucs` | ドラム stem 分離 |
-| `omnizart` | ドラム自動採譜 → MIDI 出力 |
+| `mt3` | ドラム自動採譜（Google MT3 モデル） |
+| `jax` / `t5x` / `seqio` | MT3 の実行基盤（JAX ベース） |
+| `note-seq` | NoteSequence → MIDI 変換 |
 | `torch` / `torchaudio` | Demucs の実行基盤 |
 | `soundfile` | ドラム stem wav の書き込み |
 | `librosa` | 音声ファイルの読み込み・前処理補助 |
 
 ## 前提確認事項
 
-- Python 3.9 以上を推奨（omnizart の依存関係に注意）
+- Python 3.9 以上を推奨
 - **Google Colab では GPU ランタイムを必ず有効化**（T4 で十分）
 - ローカル実行で CUDA 対応 GPU がない場合、処理に数十分かかることがある
-- omnizart は初回実行時にモデルファイルを `~/.omnizart/` にダウンロードする
-- Colab では omnizart の `vamp` 依存を除去したパッチインストールが必要（ノートブックが自動で処理）
+- MT3 チェックポイント（約 400 MB）は初回実行前に GCS からダウンロードが必要（ノートブックが自動で処理）
+- チェックポイントのパスは `MT3_CHECKPOINT` 環境変数で変更可能（デフォルト: `/tmp/mt3/mt3/`）

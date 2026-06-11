@@ -2,9 +2,9 @@
 
 ## 役割
 
-**Step 2**: omnizart の drum モジュールを使ってドラム stem wav を解析し、MIDI ファイルとして `output/` に保存する。
+**Step 2**: Google MT3 (Multi-Task Music Transcription) を使ってドラム stem wav を解析し、MIDI ファイルとして `output/` に保存する。
 
-## 構成ファイル（実装時に作成）
+## 構成ファイル
 
 ```
 transcription/
@@ -24,52 +24,66 @@ def transcribe(drums_wav_path: Path, output_dir: Path) -> Path:
 
 ## 実装詳細
 
-### omnizart 呼び出し方法
-
-omnizart は Python API を提供している。drum モジュールを直接呼び出す。
+### MT3 推論フロー
 
 ```python
-from omnizart.drum import app as drum_app
+import librosa
+import note_seq
+from mt3 import metrics_utils, note_sequences, spectrograms, vocabularies
 
-midi_path = drum_app.transcribe(str(drums_wav_path), output=str(output_dir))
+# 1. 16 kHz でリサンプリング
+audio, _ = librosa.load(wav_path, sr=16000, mono=True)
+
+# 2. メルスペクトログラムを 512 フレーム (~4 秒) 単位に分割
+spectrogram = spectrograms.compute_spectrogram(audio, spectrogram_config)
+
+# 3. T5X モデル（JAX）でトークン列を推論
+tokens, _ = predict_fn(params, {"encoder_input_tokens": batch, ...}, None)
+
+# 4. トークン → NoteSequence → MIDI
+result = metrics_utils.event_predictions_to_ns(predictions, codec=codec,
+    encoding_spec=note_sequences.NoteEncodingWithTiesSpec)
+note_seq.sequence_proto_to_midi_file(result["est_ns"], str(midi_path))
 ```
+
+### モデルキャッシュ
+
+- モジュールレベルの `_cached_model` / `_cached_ckpt` によりプロセス内での再ロードを回避する
+- チェックポイントパスは `MT3_CHECKPOINT` 環境変数で変更可能（デフォルト: `/tmp/mt3/mt3/`）
 
 ### 出力ファイル
 
-- omnizart が生成した MIDI データを **そのまま** `output/` に保存する
+- MT3 が生成した MIDI データを **そのまま** `output/` に保存する
 - ノートの丸め・量子化、特定打楽器へのフィルタリング、ベロシティ補正などの後処理は一切行わない
 - ファイル名は `{入力楽曲名}.mid` とする（`main.py` でリネームを担当）
 
-### モデルダウンロード
+### チェックポイントのダウンロード
 
-- omnizart は初回実行時に自動的にモデルファイルを `~/.omnizart/` にダウンロードする
-- オフライン環境では事前に `omnizart application download-models drum` を実行しておく必要がある
+```bash
+gsutil -q -m cp -r gs://mt3/checkpoints/mt3/ /tmp/mt3/
+```
+
+Colab ノートブックのセル 4 が自動で実行する。ランタイムを再起動するたびに再実行が必要（`/tmp/` は揮発性）。
 
 ## 依存ライブラリ
 
 ```
-omnizart
-```
-
-omnizart は内部で以下を使用するが、通常は omnizart インストール時に解決される:
-
-```
-tensorflow (>=2.x)
-librosa
-pretty_midi
+mt3          # git+https://github.com/magenta/mt3
+t5x          # MT3 の T5X フレームワーク（mt3 依存として自動インストール）
+seqio        # データパイプライン（mt3 依存として自動インストール）
+note-seq     # NoteSequence ↔ MIDI 変換（mt3 依存として自動インストール）
+jax[cuda12_pip]   # MT3 の JAX バックエンド
 ```
 
 ## 注意事項
 
-- omnizart の依存する TensorFlow と Demucs の依存する PyTorch は同一環境に共存できるが、
-  CUDA バージョンの整合性に注意すること
-- omnizart の出力パスが引数の `output_dir` と異なる場合（内部でリネームが発生する場合）は、
-  `transcriber.py` 内で実際の出力ファイルを glob で特定して返す
+- MT3 は JAX ベース、Demucs は PyTorch ベース。同一環境に共存できるが CUDA バージョンの整合性に注意
+- チェックポイントは約 400 MB。Colab の `/tmp/` は揮発性なため、ランタイム再起動後に再ダウンロードが必要
 
 ## エラーケース
 
 | 状況 | 対処 |
 |------|------|
 | ドラム wav が存在しない | `FileNotFoundError` を raise（`main.py` でキャッチ） |
-| モデルファイル未ダウンロード | omnizart の例外をそのまま伝播させ、ダウンロードコマンドをログに出力 |
-| MIDI ファイルが生成されなかった | `RuntimeError` を raise |
+| MT3 依存未インストール | `ImportError` にインストールコマンドを付けて raise |
+| チェックポイント未ダウンロード | T5X がパスを見つけられず例外を送出（セル 4 を再実行） |
