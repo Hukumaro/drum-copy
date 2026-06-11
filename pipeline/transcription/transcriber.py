@@ -3,9 +3,16 @@ import pkgutil
 import shutil
 from pathlib import Path
 
-# Python 3.12 removed pkgutil.ImpImporter, but older deps (pkg_resources, music21) still reference it.
+# Python 3.12 removed pkgutil.ImpImporter / ImpLoader; older deps still reference them.
 if not hasattr(pkgutil, "ImpImporter"):
-    pkgutil.ImpImporter = type(None)  # type: ignore[attr-defined]
+    class _ImpImporter:  # type: ignore[no-redef]
+        def __init__(self, path=None): self.path = path
+        def find_module(self, fullname, path=None): return None
+        def iter_modules(self, prefix=""): return iter([])
+    pkgutil.ImpImporter = _ImpImporter  # type: ignore[attr-defined]
+if not hasattr(pkgutil, "ImpLoader"):
+    class _ImpLoader: pass  # type: ignore[no-redef]
+    pkgutil.ImpLoader = _ImpLoader  # type: ignore[attr-defined]
 
 logger = logging.getLogger(__name__)
 
