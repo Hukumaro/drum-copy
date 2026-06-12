@@ -55,7 +55,11 @@ class _InferenceModel:
                 str(mt3_dir / "gin" / "model.gin"),
                 str(mt3_dir / "gin" / f"{model_type}.gin"),
             ],
-            bindings=[],
+            bindings=[
+                "from __gin__ import dynamic_registration",
+                "from mt3 import vocabularies",
+                "VOCAB_CONFIG=@vocabularies.VocabConfig()",
+            ],
         )
 
         self._batch_size = 8
