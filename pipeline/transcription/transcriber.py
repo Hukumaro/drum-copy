@@ -33,6 +33,11 @@ class _InferenceModel:
     """
 
     def __init__(self, checkpoint_path: str, model_type: str = "mt3") -> None:
+        # clear_in_memory_compilation_cache was removed in JAX 0.4.14+; t5x still imports it
+        import jax._src.interpreters.pxla as _pxla
+        if not hasattr(_pxla, "clear_in_memory_compilation_cache"):
+            _pxla.clear_in_memory_compilation_cache = lambda: None
+
         import gin
         import seqio
         import t5x
