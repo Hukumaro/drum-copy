@@ -2,20 +2,21 @@
 
 ## 役割
 
-**Step 2**: Google MT3 (Multi-Task Music Transcription) を使ってドラム stem wav を解析し、MIDI ファイルとして `output/` に保存する。
+**Step 2**: YourMT3+ (mimbres/YourMT3) を使ってドラム stem wav を解析し、MIDI ファイルとして `output/` に保存する。
 
 ## 構成ファイル
 
 ```
 transcription/
 ├── __init__.py
-└── transcriber.py    # メイン処理: transcribe(drums_wav_path, output_dir) -> Path
+├── transcriber.py       # ドラム採譜: transcribe(wav_path, output_dir, stem_name) -> Path
+└── bass_transcriber.py  # ベース採譜: transcribe_bass(wav_path, output_dir, stem_name) -> Path
 ```
 
 ## 主要関数インターフェース
 
 ```python
-def transcribe(drums_wav_path: Path, output_dir: Path) -> Path:
+def transcribe(wav_path: Path, output_dir: Path, stem_name: str = "") -> Path:
     """
     Returns:
         midi_path: output_dir 以下に保存された MIDI ファイルのパス
@@ -24,66 +25,89 @@ def transcribe(drums_wav_path: Path, output_dir: Path) -> Path:
 
 ## 実装詳細
 
-### MT3 推論フロー
+### YourMT3+ 推論フロー
 
-```python
-import librosa
-import note_seq
-from mt3 import metrics_utils, note_sequences, spectrograms, vocabularies
-
-# 1. 16 kHz でリサンプリング
-audio, _ = librosa.load(wav_path, sr=16000, mono=True)
-
-# 2. メルスペクトログラムを 512 フレーム (~4 秒) 単位に分割
-spectrogram = spectrograms.compute_spectrogram(audio, spectrogram_config)
-
-# 3. T5X モデル（JAX）でトークン列を推論
-tokens, _ = predict_fn(params, {"encoder_input_tokens": batch, ...}, None)
-
-# 4. トークン → NoteSequence → MIDI
-result = metrics_utils.event_predictions_to_ns(predictions, codec=codec,
-    encoding_spec=note_sequences.NoteEncodingWithTiesSpec)
-note_seq.sequence_proto_to_midi_file(result["est_ns"], str(midi_path))
 ```
+ドラム stem wav
+  → torchaudio.info() でメタデータ取得
+  → model_helper.transcribe(model, audio_info)  # 全楽器 MIDI を生成
+  → _extract_drum_channel()                      # MIDI channel 9 のみ抽出
+  → output/{stem_name}.mid
+```
+
+### YourMT3+ のセットアップ
+
+Colab セットアップセルが `/tmp/ymt3/` に HuggingFace Spaces リポジトリをクローンする。
+モデルウェイト（~600 MB）は初回 `load_model_checkpoint()` 呼び出し時に HuggingFace から自動ダウンロード。
+
+```bash
+git clone --depth=1 https://huggingface.co/spaces/mimbres/YourMT3 /tmp/ymt3
+pip install -r /tmp/ymt3/requirements.txt
+```
+
+クローン先のオーバーライド: `export YMT3_DIR=/path/to/ymt3`
+
+### 使用チェックポイント
+
+`YPTF.MoE+ Multi (noPS)` — 13チャンネル Mixture-of-Experts モデル。
+AMT ベンチマーク（ENST Drums を含む）で最高精度。
+
+```
+mc13_256_g4_all_v7_mt3f_sqr_rms_moe_wf4_n8k2_silu_rope_rp_b36_nops@last.ckpt
+```
+
+### ドラムチャンネル抽出
+
+YourMT3+ は全楽器を含む多チャンネル MIDI を出力する。
+`_extract_drum_channel()` が MIDI channel 9（GM パーカッション標準）のノートのみを保持し、
+他のノートイベントを除去する。channel 9 のノートが見つからない場合はフル MIDI をそのまま保存する。
 
 ### モデルキャッシュ
 
-- モジュールレベルの `_cached_model` / `_cached_ckpt` によりプロセス内での再ロードを回避する
-- チェックポイントパスは `MT3_CHECKPOINT` 環境変数で変更可能（デフォルト: `/tmp/mt3/mt3/`）
+モジュールレベルの `_cached_model` によりプロセス内での再ロードを回避する。
 
 ### 出力ファイル
 
-- MT3 が生成した MIDI データを **そのまま** `output/` に保存する
-- ノートの丸め・量子化、特定打楽器へのフィルタリング、ベロシティ補正などの後処理は一切行わない
-- ファイル名は `{入力楽曲名}.mid` とする（`main.py` でリネームを担当）
+- ファイル名: `{wav_stem}_{stem_name}.mid`（stem_name が空の場合は `{wav_stem}.mid`）
+- YourMT3+ が生成した MIDI の channel 9 を抽出して保存（後処理なし）
 
-### チェックポイントのダウンロード
+## ベース採譜（bass_transcriber.py）
 
-```bash
-gsutil -q -m cp -r gs://mt3/checkpoints/mt3/ /tmp/mt3/
+Basic Pitch（Spotify）を使用。v0.3.0+ は ONNX Runtime ベースで TensorFlow 不要。
+
+```python
+def transcribe_bass(wav_path: Path, output_dir: Path, stem_name: str = "bass") -> Path:
 ```
 
-Colab ノートブックのセル 4 が自動で実行する。ランタイムを再起動するたびに再実行が必要（`/tmp/` は揮発性）。
+- `minimum_frequency=30.0 Hz`（B0以下のサブベースノイズを除去）
+- `maximum_frequency`は無制限（Demucs でステム分離済みのため）
+- 出力: `pretty_midi.PrettyMIDI.write()` でファイル保存
+
+インストール: `pip install 'basic-pitch[onnx]'`
+
+## stem → transcriber 対応（ノートブック cell 15 の _dispatch）
+
+| stem | transcriber |
+|------|------------|
+| `"drums"` | `transcriber.transcribe()` — YourMT3+ |
+| `"bass"` | `bass_transcriber.transcribe_bass()` — Basic Pitch |
 
 ## 依存ライブラリ
 
 ```
-mt3          # git+https://github.com/magenta/mt3
-t5x          # MT3 の T5X フレームワーク（mt3 依存として自動インストール）
-seqio        # データパイプライン（mt3 依存として自動インストール）
-note-seq     # NoteSequence ↔ MIDI 変換（mt3 依存として自動インストール）
-jax[cuda12_pip]   # MT3 の JAX バックエンド
+torch / torchaudio    # YourMT3+ 実行基盤（Demucs と共有、同一 venv で動作）
+mido                  # MIDI channel フィルタリング（YourMT3+ requirements.txt に含まれる）
+basic-pitch[onnx]     # ベース採譜（ONNX Runtime ベース、TF 不要）
+pretty_midi           # basic-pitch 依存、MIDI 保存に使用
 ```
 
-## 注意事項
-
-- MT3 は JAX ベース、Demucs は PyTorch ベース。同一環境に共存できるが CUDA バージョンの整合性に注意
-- チェックポイントは約 400 MB。Colab の `/tmp/` は揮発性なため、ランタイム再起動後に再ダウンロードが必要
+**注意**: すべて PyTorch / ONNX ベース。Demucs と同一 venv で動作し、TF ABI ハックは不要。
 
 ## エラーケース
 
 | 状況 | 対処 |
 |------|------|
-| ドラム wav が存在しない | `FileNotFoundError` を raise（`main.py` でキャッチ） |
-| MT3 依存未インストール | `ImportError` にインストールコマンドを付けて raise |
-| チェックポイント未ダウンロード | T5X がパスを見つけられず例外を送出（セル 4 を再実行） |
+| ドラム wav が存在しない | `FileNotFoundError` を raise |
+| YourMT3+ リポジトリ未クローン | `_ensure_ymt3()` が自動クローンを試みる |
+| モデルウェイト未ダウンロード | `load_model_checkpoint()` が HuggingFace から自動取得 |
+| channel 9 ノートなし | フル MIDI を保存（ワーニングログを出力）|

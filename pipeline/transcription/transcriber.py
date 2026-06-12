@@ -1,201 +1,124 @@
-"""Audio stem transcription using Google MT3 (Multi-Task Music Transcription).
+"""Drum transcription using YourMT3+ (mimbres/YourMT3).
 
-Required packages:
-    pip install git+https://github.com/magenta/mt3
-    pip install t5x seqio note-seq 'jax[cuda12_pip]'
+Setup (handled automatically on first call, or pre-run in Colab setup cell):
+    git clone --depth=1 https://huggingface.co/spaces/mimbres/YourMT3 /tmp/ymt3
+    pip install -r /tmp/ymt3/requirements.txt
 
-Checkpoint (download once):
-    gsutil -q -m cp -r gs://mt3/checkpoints/mt3/ /tmp/mt3/
-    or export MT3_CHECKPOINT=/path/to/checkpoint/
+Model weights (~600 MB) download automatically from HuggingFace on first call.
+Override the clone location with: export YMT3_DIR=/path/to/ymt3
 """
-import functools
 import logging
 import os
+import subprocess
+import sys
 from pathlib import Path
-
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
-_SAMPLE_RATE = 16000
-_DEFAULT_CHECKPOINT = os.environ.get("MT3_CHECKPOINT", "/tmp/mt3/mt3/")
+_DEFAULT_YMT3_DIR = Path(os.environ.get("YMT3_DIR", "/tmp/ymt3"))
+
+# YPTF.MoE+ Multi (noPS) — best general accuracy, no pitch-shifting augmentation
+_CHECKPOINT = "mc13_256_g4_all_v7_mt3f_sqr_rms_moe_wf4_n8k2_silu_rope_rp_b36_nops@last.ckpt"
+_CHECKPOINT_ARGS = [
+    _CHECKPOINT, "-p", "2024", "-tk", "mc13_full_plus_256", "-dec", "multi-t5",
+    "-nl", "26", "-enc", "perceiver-tf", "-sqr", "1", "-ff", "moe", "-wf", "4",
+    "-nmoe", "8", "-kmoe", "2", "-act", "silu", "-epe", "rope", "-rp", "1",
+    "-ac", "spec", "-hop", "300", "-atc", "1", "-pr", "16",
+]
 
 _cached_model = None
-_cached_ckpt = None
 
 
-class _InferenceModel:
-    """T5X-based MT3 transcription model.
+def _ensure_ymt3(ymt3_dir: Path) -> Path:
+    """Return the YourMT3+ src directory, cloning the repo if not already present."""
+    src = ymt3_dir / "amt" / "src"
+    if src.is_dir():
+        return src
 
-    Adapted from the MT3 Colab notebook:
-    https://colab.research.google.com/github/magenta/mt3/blob/main/mt3/colab/
-    music_transcription_with_transformers.ipynb
+    logger.info("Cloning YourMT3+ to %s ...", ymt3_dir)
+    ymt3_dir.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "clone", "--depth=1",
+         "https://huggingface.co/spaces/mimbres/YourMT3",
+         str(ymt3_dir)],
+        check=True,
+    )
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-q", "-r",
+         str(ymt3_dir / "requirements.txt")],
+        check=True,
+    )
+    return src
+
+
+def _load_model(ymt3_dir: Path):
+    global _cached_model
+    if _cached_model is not None:
+        return _cached_model
+
+    src = _ensure_ymt3(ymt3_dir)
+    if str(src) not in sys.path:
+        sys.path.insert(0, str(src))
+
+    import torch
+    from model_helper import load_model_checkpoint
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info("Loading YourMT3+ checkpoint on %s ...", device)
+    _cached_model = load_model_checkpoint(args=_CHECKPOINT_ARGS, device=device)
+    return _cached_model
+
+
+def _extract_drum_channel(src_path: Path, dst_path: Path) -> None:
+    """Write a new MIDI containing only channel-9 (GM percussion) note events.
+
+    Meta messages (tempo, time signature, etc.) are preserved in each drum track.
+    If no channel-9 notes are found, the full source MIDI is copied unchanged —
+    this avoids an empty output when the model assigns drums to a non-standard channel.
     """
+    import mido
+    import shutil
 
-    def __init__(self, checkpoint_path: str, model_type: str = "mt3") -> None:
-        # clear_in_memory_compilation_cache was removed in JAX 0.4.14+; t5x still imports it
-        import jax._src.interpreters.pxla as _pxla
-        if not hasattr(_pxla, "clear_in_memory_compilation_cache"):
-            _pxla.clear_in_memory_compilation_cache = lambda: None
+    mid = mido.MidiFile(str(src_path))
+    out = mido.MidiFile(ticks_per_beat=mid.ticks_per_beat)
 
-        import gin
-        import seqio
-        import t5x
-        import t5x.adafactor
-        import t5x.partitioning
-        import t5x.utils
-        import tensorflow as tf
-        import mt3 as _mt3_root
-        from mt3 import models as mt3_models, network, spectrograms, vocabularies
+    for track in mid.tracks:
+        # Keep meta messages + channel-9 note events; drop all other note events.
+        filtered = [
+            msg for msg in track
+            if msg.type not in ("note_on", "note_off") or msg.channel == 9
+        ]
+        has_notes = any(m.type in ("note_on", "note_off") for m in filtered)
+        if has_notes:
+            new_track = mido.MidiTrack()
+            new_track.extend(filtered)
+            out.tracks.append(new_track)
 
-        mt3_dir = Path(_mt3_root.__file__).parent
-        gin.clear_config()
-        gin.parse_config_files_and_bindings(
-            config_files=[
-                str(mt3_dir / "gin" / "model.gin"),
-                str(mt3_dir / "gin" / f"{model_type}.gin"),
-            ],
-            bindings=[
-                "from __gin__ import dynamic_registration",
-                "from mt3 import vocabularies",
-                "VOCAB_CONFIG=@vocabularies.VocabularyConfig()",
-            ],
+    if not out.tracks:
+        logger.warning(
+            "No channel-9 notes found in YourMT3+ output (%s); saving full MIDI.",
+            src_path.name,
         )
-
-        self._batch_size = 8
-        self._inputs_length = 512    # spectrogram frames per chunk (~4 s at 16 kHz)
-        self._outputs_length = 1024  # max output token length
-
-        self.spectrogram_config = spectrograms.SpectrogramConfig()
-        self.codec = vocabularies.build_codec(vocab_config=vocabularies.VocabularyConfig())
-        self.vocabulary = vocabularies.vocabulary_from_codec(self.codec)
-        input_depth = spectrograms.input_depth(self.spectrogram_config)
-
-        output_features = {
-            "inputs": seqio.ContinuousFeature(dtype=tf.float32, rank=2),
-            "targets": seqio.Feature(vocabulary=self.vocabulary),
-        }
-        partitioner = t5x.partitioning.PjitPartitioner(num_partitions=1)
-
-        t5x_model = mt3_models.ContinuousInputsEncoderDecoderModel(
-            module=network.Transformer(),  # gin injects config via model.gin: network.Transformer.config = @network.T5Config()
-            input_vocabulary=output_features["inputs"].vocabulary,
-            output_vocabulary=output_features["targets"].vocabulary,
-            optimizer_def=t5x.adafactor.Adafactor(decay_rate=0.8, step_offset=0),
-            input_depth=input_depth,
-        )
-        restore_cfg = t5x.utils.RestoreCheckpointConfig(
-            path=checkpoint_path, mode="specific", dtype="float32"
-        )
-        initializer = t5x.utils.TrainStateInitializer(
-            optimizer_def=t5x_model.optimizer_def,
-            init_fn=t5x_model.get_initial_variables,
-            input_shapes={
-                "encoder_input_tokens": (self._batch_size, self._inputs_length, input_depth),
-                "decoder_input_tokens": (self._batch_size, self._outputs_length),
-            },
-            partitioner=partitioner,
-        )
-        self._train_state = list(initializer.from_checkpoints([restore_cfg]))[0]
-        train_state_axes = initializer.train_state_axes
-
-        self._predict_fn = partitioner.partition(
-            functools.partial(
-                t5x_model.predict_batch_with_aux,
-                decoder_params={"max_decode_steps": self._outputs_length},
-                return_all_decodes=False,
-                num_decodes=1,
-            ),
-            in_axis_resources=(
-                train_state_axes.params,
-                t5x.partitioning.PartitionSpec("data"),
-                None,
-            ),
-            out_axis_resources=t5x.partitioning.PartitionSpec("data"),
-        )
-
-    def __call__(self, audio: np.ndarray):
-        """Transcribe 1-D 16 kHz audio to a note_seq.NoteSequence."""
-        from mt3 import metrics_utils, note_sequences
-
-        frames, frame_times = self._audio_to_frames(audio)
-        all_predictions = []
-        for i in range(0, len(frames), self._batch_size):
-            batch = frames[i : i + self._batch_size]
-            n = len(batch)
-            if n < self._batch_size:
-                pad = np.zeros(
-                    (self._batch_size - n, *batch.shape[1:]), dtype=batch.dtype
-                )
-                batch = np.concatenate([batch, pad])
-            tokens, _ = self._predict_fn(
-                self._train_state.params,
-                {
-                    "encoder_input_tokens": batch,
-                    "decoder_input_tokens": np.zeros(
-                        (self._batch_size, self._outputs_length), dtype=np.int32
-                    ),
-                },
-                None,
-            )
-            all_predictions.extend(tokens[:n].tolist())
-
-        result = metrics_utils.event_predictions_to_ns(
-            [
-                {"est_tokens": p, "start_time": t, "raw_inputs": []}
-                for p, t in zip(all_predictions, frame_times)
-            ],
-            codec=self.codec,
-            encoding_spec=note_sequences.NoteEncodingWithTiesSpec,
-        )
-        return result["est_ns"]
-
-    def _audio_to_frames(self, audio: np.ndarray):
-        """Compute mel spectrogram and split into fixed-length chunks."""
-        from mt3 import spectrograms as spec_lib
-
-        spectrogram = spec_lib.compute_spectrogram(audio, self.spectrogram_config)
-        frames, times = [], []
-        sr = self.spectrogram_config.sample_rate
-        hw = self.spectrogram_config.hop_width
-
-        for start in range(0, spectrogram.shape[0], self._inputs_length):
-            chunk = spectrogram[start : start + self._inputs_length]
-            if chunk.shape[0] < self._inputs_length:
-                chunk = np.pad(chunk, [(0, self._inputs_length - chunk.shape[0]), (0, 0)])
-            frames.append(chunk)
-            times.append(start * hw / sr)
-
-        return np.array(frames, dtype=np.float32), times
+        shutil.copy2(str(src_path), str(dst_path))
+    else:
+        out.save(str(dst_path))
 
 
 def transcribe(wav_path: Path, output_dir: Path, stem_name: str = "") -> Path:
-    """Transcribe a stem wav to MIDI using Google MT3.
+    """Transcribe a drum stem wav to MIDI using YourMT3+.
 
     Args:
-        wav_path:   Path to the stem wav produced by stem_separation.
-        output_dir: Directory where the final MIDI file will be saved.
-        stem_name:  Optional suffix appended to the output filename
-                    (e.g. "bass" → "{wav_stem}_bass.mid").
-                    When empty, the output is "{wav_stem}.mid".
+        wav_path:   Path to the drum stem wav produced by stem_separation.
+        output_dir: Directory where the MIDI file will be saved.
+        stem_name:  Optional label appended to the output filename
+                    (e.g. "drums" → "{wav_stem}_drums.mid").
 
     Returns:
         Path to the saved MIDI file.
 
     Raises:
         FileNotFoundError: If wav_path does not exist.
-        ImportError:       If MT3 dependencies are not installed.
     """
-    global _cached_model, _cached_ckpt
-
-    try:
-        import librosa
-        import note_seq
-    except ImportError as exc:
-        raise ImportError(
-            "Required packages not installed: pip install librosa note-seq"
-        ) from exc
-
     wav_path = Path(wav_path)
     output_dir = Path(output_dir)
 
@@ -204,20 +127,34 @@ def transcribe(wav_path: Path, output_dir: Path, stem_name: str = "") -> Path:
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Loading audio at %d Hz: %s", _SAMPLE_RATE, wav_path)
-    audio, _ = librosa.load(str(wav_path), sr=_SAMPLE_RATE, mono=True)
+    ymt3_dir = Path(os.environ.get("YMT3_DIR", str(_DEFAULT_YMT3_DIR)))
+    model = _load_model(ymt3_dir)
 
-    if _cached_model is None or _cached_ckpt != _DEFAULT_CHECKPOINT:
-        logger.info("Loading MT3 model from: %s", _DEFAULT_CHECKPOINT)
-        _cached_model = _InferenceModel(_DEFAULT_CHECKPOINT)
-        _cached_ckpt = _DEFAULT_CHECKPOINT
+    src = ymt3_dir / "amt" / "src"
+    if str(src) not in sys.path:
+        sys.path.insert(0, str(src))
 
-    logger.info("Running MT3 transcription...")
-    note_sequence = _cached_model(audio)
+    import torchaudio
+    from model_helper import transcribe as _ymt3_transcribe
+
+    info = torchaudio.info(str(wav_path))
+    audio_info = {
+        "filepath": str(wav_path),
+        "track_name": wav_path.stem,
+        "sample_rate": info.sample_rate,
+        "bits_per_sample": info.bits_per_sample,
+        "num_channels": info.num_channels,
+        "num_frames": info.num_frames,
+        "duration": info.num_frames / info.sample_rate,
+        "encoding": info.encoding,
+    }
+
+    logger.info("Running YourMT3+ transcription: %s", wav_path.name)
+    raw_midi = Path(_ymt3_transcribe(model, audio_info))
 
     out_stem = wav_path.stem + (f"_{stem_name}" if stem_name else "")
     midi_path = output_dir / (out_stem + ".mid")
-    note_seq.sequence_proto_to_midi_file(note_sequence, str(midi_path))
 
+    _extract_drum_channel(raw_midi, midi_path)
     logger.info("MIDI saved: %s", midi_path)
     return midi_path

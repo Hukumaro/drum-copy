@@ -48,10 +48,10 @@ def process_file(
         return midi_out
 
     logger.info("=== Step 1: Stem separation — %s ===", input_path.name)
-    drums_wav = separate(input_path, tmp_dir, model=model)
+    stem_wavs = separate(input_path, tmp_dir, model=model, stems=["drums"])
 
-    logger.info("=== Step 2: Drum transcription — %s ===", drums_wav.name)
-    midi_path = transcribe(drums_wav, output_dir)
+    logger.info("=== Step 2: Drum transcription — %s ===", input_path.name)
+    midi_path = transcribe(stem_wavs["drums"], output_dir)
 
     if midi_path.stem != input_path.stem:
         renamed = midi_path.parent / (input_path.stem + ".mid")
