@@ -37,7 +37,7 @@ def transcribe_bass(wav_path: Path, output_dir: Path, stem_name: str = "bass") -
         from basic_pitch import ICASSP_2022_MODEL_PATH
     except ImportError as exc:
         raise ImportError(
-            "basic-pitch not installed: pip install 'basic-pitch[onnx]'"
+            "basic-pitch not installed: pip install basic-pitch"
         ) from exc
 
     wav_path = Path(wav_path)
