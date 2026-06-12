@@ -58,7 +58,7 @@ class _InferenceModel:
             bindings=[
                 "from __gin__ import dynamic_registration",
                 "from mt3 import vocabularies",
-                "VOCAB_CONFIG=@vocabularies.VocabConfig()",
+                "VOCAB_CONFIG=@vocabularies.VocabularyConfig()",
             ],
         )
 
@@ -67,7 +67,7 @@ class _InferenceModel:
         self._outputs_length = 1024  # max output token length
 
         self.spectrogram_config = spectrograms.SpectrogramConfig()
-        self.codec = vocabularies.build_codec(vocab_config=vocabularies.VocabConfig())
+        self.codec = vocabularies.build_codec(vocab_config=vocabularies.VocabularyConfig())
         self.vocabulary = vocabularies.vocabulary_from_codec(self.codec)
         input_depth = spectrograms.input_depth(self.spectrogram_config)
 
