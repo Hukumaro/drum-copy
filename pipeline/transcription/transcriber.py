@@ -1,4 +1,4 @@
-"""Drum stem transcription using Google MT3 (Multi-Task Music Transcription).
+"""Audio stem transcription using Google MT3 (Multi-Task Music Transcription).
 
 Required packages:
     pip install git+https://github.com/magenta/mt3
@@ -160,18 +160,21 @@ class _InferenceModel:
         return np.array(frames, dtype=np.float32), times
 
 
-def transcribe(drums_wav_path: Path, output_dir: Path) -> Path:
-    """Transcribe a drum stem wav to MIDI using Google MT3.
+def transcribe(wav_path: Path, output_dir: Path, stem_name: str = "") -> Path:
+    """Transcribe a stem wav to MIDI using Google MT3.
 
     Args:
-        drums_wav_path: Path to the drum stem wav produced by stem_separation.
-        output_dir:     Directory where the final MIDI file will be saved.
+        wav_path:   Path to the stem wav produced by stem_separation.
+        output_dir: Directory where the final MIDI file will be saved.
+        stem_name:  Optional suffix appended to the output filename
+                    (e.g. "bass" → "{wav_stem}_bass.mid").
+                    When empty, the output is "{wav_stem}.mid".
 
     Returns:
         Path to the saved MIDI file.
 
     Raises:
-        FileNotFoundError: If drums_wav_path does not exist.
+        FileNotFoundError: If wav_path does not exist.
         ImportError:       If MT3 dependencies are not installed.
     """
     global _cached_model, _cached_ckpt
@@ -184,16 +187,16 @@ def transcribe(drums_wav_path: Path, output_dir: Path) -> Path:
             "Required packages not installed: pip install librosa note-seq"
         ) from exc
 
-    drums_wav_path = Path(drums_wav_path)
+    wav_path = Path(wav_path)
     output_dir = Path(output_dir)
 
-    if not drums_wav_path.exists():
-        raise FileNotFoundError(f"Drum wav not found: {drums_wav_path}")
+    if not wav_path.exists():
+        raise FileNotFoundError(f"Wav not found: {wav_path}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Loading audio at %d Hz: %s", _SAMPLE_RATE, drums_wav_path)
-    audio, _ = librosa.load(str(drums_wav_path), sr=_SAMPLE_RATE, mono=True)
+    logger.info("Loading audio at %d Hz: %s", _SAMPLE_RATE, wav_path)
+    audio, _ = librosa.load(str(wav_path), sr=_SAMPLE_RATE, mono=True)
 
     if _cached_model is None or _cached_ckpt != _DEFAULT_CHECKPOINT:
         logger.info("Loading MT3 model from: %s", _DEFAULT_CHECKPOINT)
@@ -203,7 +206,8 @@ def transcribe(drums_wav_path: Path, output_dir: Path) -> Path:
     logger.info("Running MT3 transcription...")
     note_sequence = _cached_model(audio)
 
-    midi_path = output_dir / (drums_wav_path.stem + ".mid")
+    out_stem = wav_path.stem + (f"_{stem_name}" if stem_name else "")
+    midi_path = output_dir / (out_stem + ".mid")
     note_seq.sequence_proto_to_midi_file(note_sequence, str(midi_path))
 
     logger.info("MIDI saved: %s", midi_path)

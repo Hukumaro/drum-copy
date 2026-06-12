@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from typing import Dict, List, Optional
 
 import torch
 import torchaudio
@@ -10,23 +11,33 @@ from demucs.pretrained import get_model
 logger = logging.getLogger(__name__)
 
 
-def separate(input_path: Path, tmp_dir: Path, model: str = "htdemucs") -> Path:
-    """Separate drum stem from an audio file using Demucs internal API.
+def separate(
+    input_path: Path,
+    tmp_dir: Path,
+    model: str = "htdemucs",
+    stems: Optional[List[str]] = None,
+) -> Dict[str, Path]:
+    """Separate audio stems from an audio file using Demucs internal API.
 
     Args:
         input_path: Path to the input audio file (wav or mp3).
-        tmp_dir:    Directory where the drum stem wav will be saved.
+        tmp_dir:    Directory where stem wav files will be saved.
         model:      Demucs model name (default: htdemucs).
+        stems:      Stem names to extract (e.g. ["drums", "bass"]).
+                    Defaults to ["drums"]. htdemucs provides:
+                    drums, bass, other, vocals.
 
     Returns:
-        Path to the separated drums.wav file.
+        Dict mapping stem name to the saved wav Path.
 
     Raises:
         FileNotFoundError: If input_path does not exist.
-        RuntimeError:      If the drum stem cannot be extracted.
+        RuntimeError:      If a requested stem is not available in the model.
     """
     input_path = Path(input_path)
     tmp_dir = Path(tmp_dir)
+    if stems is None:
+        stems = ["drums"]
 
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
@@ -40,6 +51,14 @@ def separate(input_path: Path, tmp_dir: Path, model: str = "htdemucs") -> Path:
     demucs_model = get_model(name=model)
     demucs_model.to(device)
     demucs_model.eval()
+
+    available = list(demucs_model.sources)
+    missing = [s for s in stems if s not in available]
+    if missing:
+        raise RuntimeError(
+            f"Stem(s) {missing} not available in model '{model}'. "
+            f"Available: {available}"
+        )
 
     logger.info("Loading audio: %s", input_path)
     # torchaudio avoids soundfile entirely (uses sox_io backend on Linux/Colab),
@@ -56,7 +75,7 @@ def separate(input_path: Path, tmp_dir: Path, model: str = "htdemucs") -> Path:
     wav -= ref.mean()
     wav /= ref.std()
 
-    logger.info("Separating stems...")
+    logger.info("Separating stems: %s", stems)
     sources = apply_model(
         demucs_model,
         wav[None],
@@ -70,20 +89,15 @@ def separate(input_path: Path, tmp_dir: Path, model: str = "htdemucs") -> Path:
     sources *= ref.std()
     sources += ref.mean()
 
-    if "drums" not in demucs_model.sources:
-        raise RuntimeError(
-            f"Model '{model}' has no 'drums' stem. "
-            f"Available: {demucs_model.sources}"
-        )
-
-    drum_idx = demucs_model.sources.index("drums")
-    drums_tensor = sources[drum_idx]
-
     out_dir = tmp_dir / input_path.stem
     out_dir.mkdir(parents=True, exist_ok=True)
-    drums_path = out_dir / "drums.wav"
 
-    torchaudio.save(str(drums_path), drums_tensor.cpu(), demucs_model.samplerate)
+    result: Dict[str, Path] = {}
+    for stem in stems:
+        idx = available.index(stem)
+        wav_path = out_dir / f"{stem}.wav"
+        torchaudio.save(str(wav_path), sources[idx].cpu(), demucs_model.samplerate)
+        logger.info("%s stem saved: %s", stem, wav_path)
+        result[stem] = wav_path
 
-    logger.info("Drum stem saved: %s", drums_path)
-    return drums_path
+    return result
