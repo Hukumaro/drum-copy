@@ -78,7 +78,7 @@ class _InferenceModel:
         partitioner = t5x.partitioning.PjitPartitioner(num_partitions=1)
 
         t5x_model = mt3_models.ContinuousInputsEncoderDecoderModel(
-            module=network.Transformer(config=gin.query_parameter("%MODEL")),
+            module=network.Transformer(),  # gin injects config via model.gin: network.Transformer.config = @network.T5Config()
             input_vocabulary=output_features["inputs"].vocabulary,
             output_vocabulary=output_features["targets"].vocabulary,
             optimizer_def=t5x.adafactor.Adafactor(decay_rate=0.8, step_offset=0),
