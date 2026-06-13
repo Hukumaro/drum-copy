@@ -1,24 +1,49 @@
-"""Bass transcription using Basic Pitch (Spotify).
-
-Requires:
-    pip install 'basic-pitch[onnx]'
-
-Basic Pitch v0.3+ uses ONNX Runtime on most platforms — no TensorFlow required.
-Compatible with the same PyTorch venv as Demucs and YourMT3+.
-"""
+"""Bass transcription using YourMT3+ (shared model with drum transcription)."""
 import logging
+import os
+import shutil
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Frequency bounds for bass guitar.
-# Lower bound: just below B0 (30.87 Hz) to absorb standard 4-string open E (41.2 Hz).
-# Upper bound: None — the Demucs bass stem already limits high-freq content.
-_MIN_FREQ_HZ: float = 30.0
+
+def _extract_non_drum_notes(src_path: Path, dst_path: Path) -> None:
+    """Write a new MIDI keeping all notes except channel-9 (GM percussion).
+
+    The bass stem is already isolated by Demucs, so the full YourMT3+ output
+    is kept. Channel 9 is excluded to remove any percussion false-positives.
+    """
+    import mido
+
+    mid = mido.MidiFile(str(src_path))
+    out = mido.MidiFile(ticks_per_beat=mid.ticks_per_beat)
+
+    for track in mid.tracks:
+        filtered = [
+            msg for msg in track
+            if msg.type not in ("note_on", "note_off") or msg.channel != 9
+        ]
+        has_notes = any(m.type in ("note_on", "note_off") for m in filtered)
+        if has_notes:
+            new_track = mido.MidiTrack()
+            new_track.extend(filtered)
+            out.tracks.append(new_track)
+
+    if not out.tracks:
+        logger.warning(
+            "No non-drum notes found in YourMT3+ output (%s); saving full MIDI.",
+            src_path.name,
+        )
+        shutil.copy2(str(src_path), str(dst_path))
+    else:
+        out.save(str(dst_path))
 
 
 def transcribe_bass(wav_path: Path, output_dir: Path, stem_name: str = "bass") -> Path:
-    """Transcribe a bass stem wav to MIDI using Basic Pitch.
+    """Transcribe a bass stem wav to MIDI using YourMT3+.
+
+    Reuses the same model instance as drum transcription (loaded once, cached).
 
     Args:
         wav_path:   Path to the bass stem wav produced by stem_separation.
@@ -30,15 +55,8 @@ def transcribe_bass(wav_path: Path, output_dir: Path, stem_name: str = "bass") -
 
     Raises:
         FileNotFoundError: If wav_path does not exist.
-        ImportError:       If basic-pitch is not installed.
     """
-    try:
-        from basic_pitch.inference import predict
-        from basic_pitch import ICASSP_2022_MODEL_PATH
-    except ImportError as exc:
-        raise ImportError(
-            "basic-pitch not installed: pip install basic-pitch"
-        ) from exc
+    from pipeline.transcription.transcriber import _load_model, _DEFAULT_YMT3_DIR
 
     wav_path = Path(wav_path)
     output_dir = Path(output_dir)
@@ -48,16 +66,34 @@ def transcribe_bass(wav_path: Path, output_dir: Path, stem_name: str = "bass") -
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Running Basic Pitch transcription: %s", wav_path.name)
-    _, midi_data, _ = predict(
-        str(wav_path),
-        ICASSP_2022_MODEL_PATH,
-        minimum_frequency=_MIN_FREQ_HZ,
-    )
+    ymt3_dir = Path(os.environ.get("YMT3_DIR", str(_DEFAULT_YMT3_DIR)))
+    model = _load_model(ymt3_dir)
+
+    src = ymt3_dir / "amt" / "src"
+    if str(src) not in sys.path:
+        sys.path.insert(0, str(src))
+
+    import torchaudio
+    from model_helper import transcribe as _ymt3_transcribe
+
+    info = torchaudio.info(str(wav_path))
+    audio_info = {
+        "filepath": str(wav_path),
+        "track_name": wav_path.stem,
+        "sample_rate": info.sample_rate,
+        "bits_per_sample": info.bits_per_sample,
+        "num_channels": info.num_channels,
+        "num_frames": info.num_frames,
+        "duration": info.num_frames / info.sample_rate,
+        "encoding": info.encoding,
+    }
+
+    logger.info("Running YourMT3+ bass transcription: %s", wav_path.name)
+    raw_midi = Path(_ymt3_transcribe(model, audio_info))
 
     out_stem = wav_path.stem + (f"_{stem_name}" if stem_name else "")
     midi_path = output_dir / (out_stem + ".mid")
-    midi_data.write(str(midi_path))
 
+    _extract_non_drum_notes(raw_midi, midi_path)
     logger.info("MIDI saved: %s", midi_path)
     return midi_path
