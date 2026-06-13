@@ -28,6 +28,25 @@ _CHECKPOINT_ARGS = [
 
 _cached_model = None
 
+_CHECKPOINT_NAME = "mc13_256_g4_all_v7_mt3f_sqr_rms_moe_wf4_n8k2_silu_rope_rp_b36_nops"
+_CHECKPOINT_SUBPATH = f"amt/logs/2024/{_CHECKPOINT_NAME}/checkpoints/last.ckpt"
+
+
+def _ensure_checkpoint(ymt3_dir: Path) -> None:
+    """Download the YourMT3+ checkpoint from HuggingFace if not already present."""
+    ckpt_path = ymt3_dir / _CHECKPOINT_SUBPATH
+    if ckpt_path.exists():
+        return
+    logger.info("Downloading YourMT3+ checkpoint (~600 MB) ...")
+    from huggingface_hub import hf_hub_download
+    hf_hub_download(
+        repo_id="mimbres/YourMT3",
+        repo_type="space",
+        filename=_CHECKPOINT_SUBPATH,
+        local_dir=str(ymt3_dir),
+    )
+    logger.info("Checkpoint ready: %s", ckpt_path)
+
 
 def _ensure_ymt3(ymt3_dir: Path) -> Path:
     """Return the YourMT3+ src directory, cloning the repo if not already present."""
@@ -57,6 +76,7 @@ def _load_model(ymt3_dir: Path):
         return _cached_model
 
     src = _ensure_ymt3(ymt3_dir)
+    _ensure_checkpoint(ymt3_dir)
     if str(src) not in sys.path:
         sys.path.insert(0, str(src))
 
